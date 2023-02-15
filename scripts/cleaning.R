@@ -1,6 +1,8 @@
 library(tidyverse)
 library(here)
 library(janitor)
+library(eyetrackingR)
+
 pilot_1 <- read_csv(here("data/raw_data", "condition_1_pilot_data.csv")) %>%
   clean_names() %>%
   separate(participant, sep = 4,
@@ -8,6 +10,13 @@ pilot_1 <- read_csv(here("data/raw_data", "condition_1_pilot_data.csv")) %>%
   mutate(block = ifelse(block == "", 1, 2))
 pilot_1_p <- read_csv(here("data/raw_data", "condition_1_pilot_participant.csv")) %>%
   clean_names()
+
+protagonist_aoi <- read_csv(here("data/raw_data", "protagonist_aoi.csv"))
+blue_agent_aoi <- read_csv(here("data/raw_data", "blue_agent_aoi.csv"))
+yellow_agent_aoi <- read_csv(here("data/raw_data", "yellow_agent_aoi.csv"))
+tree_aoi <- read_csv(here("data/raw_data", "tree_object_aoi.csv"))
+candy_aoi <- read_csv(here("data/raw_data", "candy_object_aoi.csv"))
+
 
 # Resample time -----------------------------------------------------------
 
@@ -107,23 +116,29 @@ d_filter <- d %>% # changed new file to be called d_filter so that we can easily
                                y_left <= 0 & y_right <= 0 ~ "none",
                                y_left <= 0 & y_right > 0 ~ "right",
                                y_left > 0 & y_right <= 0 ~ "left",
-                               y_left > 0 & y_right > 0 ~ "both"))
+                               y_left > 0 & y_right > 0 ~ "both"),
+         trackloss = ifelse(eye_valid == "none",
+                            yes = "yes", no = "no"))
 
-# Filter out any impossible coordinates (x must be smaller than 1920, y must be smaller than 1080)
-# these are the dimensions of the screen. any coordinates larger than this are therefore, errors
+# Catch the impossible coordinates (x must be smaller than 1920, y must be smaller than 1080)
+# these are the dimensions of the screen. Any coordinates larger than this are therefore errors
 d_filter <- d_filter %>% 
-  filter(x_left < 1920 &
-           y_left < 1080 &
-           x_right < 1920 &
-           y_right < 1080)
+  mutate(trackloss = ifelse(x_left > 1920 | y_left > 1080 | x_right > 1920 | y_right > 1080,
+                            yes = "yes", no = "no"))
 
-# Both eyes have data -----------------------------------------------------
+# Brief look at trackloss so far
+trackloss <- d_filter %>%
+  group_by(trackloss) %>%
+  summarize(n = n())
+
+by_eyes <- d_filter %>%
+  group_by(eye_valid) %>%
+  summarize(n = n())
+
+# Merging instances where both eyes have data -----------------------------------------------------
 d_both_eyes <- d_filter %>%
   filter(eye_valid == "both",
-         x_left > 0 & # by filtering out gaze points where the x and y coordinates have to be greater than 0
-           y_left > 0 & # we remove all points of 0 and negative values.
-           x_right > 0 &
-           y_right > 0)
+         trackloss == "no")
 
 ggplot(sample_n(d_both_eyes, 1000),  # plot to check if we removed the negative and 0s successfully
        aes(x = x_left, y = x_right)) +
@@ -164,14 +179,17 @@ eyes_y <- d_both_eyes %>%
 # filter trials where the difference in coordinate between two eyes exceed 2 SD from the mean as this likely indicates a tracker error (as set in previous code)
 # again, logic here is that two eyes cannot look at two different spots on the screen
 data <- d_both_eyes %>%
-  filter(delta_x <= eyes_x$x_max, #filter for differences in x coordinates less than or equal to the set maximum difference defined in eyes_x
-         delta_x >= eyes_x$x_min, #filter for differences in x coordinates greater than or equal to the set minimum difference defined in eyes_x
-         delta_y <= eyes_y$y_max, #filter for differences in y coordinates less than or equal to the set maximum difference defined in eyes_y
-         delta_y >= eyes_y$y_min) #filter for differences in x coordinates greater than or equal to the set minimum difference defined in eyes_y
+  mutate(trackloss = ifelse(delta_x <= eyes_x$x_max & #filter for differences in x coordinates less than or equal to the set maximum difference defined in eyes_x
+         delta_x >= eyes_x$x_min & #filter for differences in x coordinates greater than or equal to the set minimum difference defined in eyes_x
+         delta_y <= eyes_y$y_max & #filter for differences in y coordinates less than or equal to the set maximum difference defined in eyes_y
+         delta_y >= eyes_y$y_min, #filter for differences in x coordinates greater than or equal to the set minimum difference defined in eyes_y
+         yes = "no", no = "yes")) 
 
 # inspect histograms again
-hist(data$delta_x)
-hist(data$delta_y)
+test <- data %>%
+  filter(trackloss == "no")
+hist(test$delta_x)
+hist(test$delta_y)
 
 # average the two eyes
 data <- data %>%
@@ -195,4 +213,78 @@ data <- data %>%
   rbind(d_one_eye)
 
 
+# Defining trials ---------------------------------------------------------
+# Not all trials are test trials; the only way to tell is by trial number
+# Adding a column to indicate that to make analysis easier
+data_trial_type <- data %>%
+  mutate(trial_type = ifelse(trial_id == 4 | trial_id == 9 | trial_id == 14 | trial_id == 19,
+                             "test_phase_1", "familiarization"),
+         trial_type = ifelse(trial_id == 5 | trial_id == 10 | trial_id == 15 | trial_id == 20,
+                             "test_phase_2", trial_type))
 
+# Preparing data for eyetrackingR ------------------------------------------
+# adding aois
+# Before adding aois, need to clean up trial name
+eyetrackingR_data <- data %>%
+  separate(col = type,
+           into = c("trial", "suffix"),
+           sep = "\\.")
+eyetrackingR_data$trial <- gsub("[[:digit:]]", "", eyetrackingR_data$trial) # remove numbers
+
+eyetrackingR_data <- add_aoi(data = eyetrackingR_data, aoi_dataframe = protagonist_aoi,
+                             x_col = "gaze_x", y_col = "gaze_y",
+                             aoi_name = "protagonist",
+                             x_min_col = "Left", x_max_col = "Right",
+                             y_min_col = "Top", y_max_col = "Bottom")
+table(eyetrackingR_data$protagonist)
+table(is.na(eyetrackingR_data$protagonist))
+
+eyetrackingR_data <- add_aoi(data = eyetrackingR_data, aoi_dataframe = blue_agent_aoi,
+                             x_col = "gaze_x", y_col = "gaze_y",
+                             aoi_name = "blue_agent",
+                             x_min_col = "Left", x_max_col = "Right",
+                             y_min_col = "Top", y_max_col = "Bottom")
+table(eyetrackingR_data$blue_agent)
+table(is.na(eyetrackingR_data$blue_agent))
+
+eyetrackingR_data <- add_aoi(data = eyetrackingR_data, aoi_dataframe = yellow_agent_aoi,
+                             x_col = "gaze_x", y_col = "gaze_y",
+                             aoi_name = "yellow_agent",
+                             x_min_col = "Left", x_max_col = "Right",
+                             y_min_col = "Top", y_max_col = "Bottom")
+table(eyetrackingR_data$yellow_agent)
+table(is.na(eyetrackingR_data$yellow_agent))
+
+eyetrackingR_data <- add_aoi(data = eyetrackingR_data, aoi_dataframe = tree_aoi,
+                             x_col = "gaze_x", y_col = "gaze_y",
+                             aoi_name = "tree",
+                             x_min_col = "Left", x_max_col = "Right",
+                             y_min_col = "Top", y_max_col = "Bottom")
+table(eyetrackingR_data$tree)
+table(is.na(eyetrackingR_data$tree))
+
+eyetrackingR_data <- add_aoi(data = eyetrackingR_data, aoi_dataframe = candy_aoi,
+                             x_col = "gaze_x", y_col = "gaze_y",
+                             aoi_name = "candy",
+                             x_min_col = "Left", x_max_col = "Right",
+                             y_min_col = "Top", y_max_col = "Bottom")
+table(eyetrackingR_data$candy)
+table(is.na(eyetrackingR_data$candy))
+
+# Adding columns needed for analysis
+eyetrackingR_data <- eyetrackingR_data %>%
+  mutate(target = trial) %>%
+  separate(col = target,
+           into = c("target", "target_background", "target_side")) %>%
+  mutate(condition = ifelse(target == "yellow" | target == "blue",
+                            yes = "social",
+                            no = "nonsocial"))
+# Trackloss
+trackloss <- trackloss_analysis(data = eyetrackingR_data)
+
+# Creating eyetrackingR dataset -------------------------------------------
+
+final_data <- make_eyetrackingr_data(eyetrackingR_data,
+                                     participant_column = "participant",
+                                     trial_column = "trial_num",
+                                     time_column = "trial_t")
